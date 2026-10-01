@@ -344,6 +344,7 @@ if [[ -n "$PROM_URL" && -n "$TOKEN" ]]; then
   prom_query 'sum(haproxy_backend_current_queue{job="router-internal-default"})' "Backend queue depth:"
   prom_query 'histogram_quantile(0.99,sum by(le)(rate(haproxy_backend_http_response_duration_seconds_bucket{job="router-internal-default"}[5m])))' "p99 backend latency (s):"
   prom_query 'histogram_quantile(0.50,sum by(le)(rate(haproxy_backend_http_response_duration_seconds_bucket{job="router-internal-default"}[5m])))' "p50 backend latency (s):"
+  prom_query 'sum(rate(container_cpu_cfs_throttled_periods_total{namespace="openshift-ingress"}[5m]))' "CPU CFS throttled periods/s:"
 
   cleanup_portforward
 else
@@ -361,6 +362,7 @@ echo "    • Backend queue depth > 0 (sustained)"
 echo "    • 503 rate increasing"
 echo "    • Router pod CPU > 80% of limit"
 echo "    • Routes per replica > 2000"
+echo "    • CPU CFS throttled periods > 0 (kernel capping CPU)"
 echo ""
 echo "  To scale router replicas:"
 echo "    oc patch ingresscontroller/${IC_NAME} -n ${NS_OPERATOR} --type merge \\"
