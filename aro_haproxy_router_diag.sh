@@ -119,12 +119,12 @@ if [[ -n "$FIRST_POD" && "$FIRST_POD" != "null" ]]; then
     sh -c 'echo "show info" | socat /var/lib/haproxy/run/haproxy.sock stdio' 2>/dev/null || true)
 
   if [[ -n "$HAINFO" ]]; then
-    CURR_CONN=$(echo "$HAINFO" | awk -F: '/^CurrConns/{gsub(/ /,"",$2); print $2}')
-    MAX_CONN=$(echo "$HAINFO" | awk -F: '/^Maxconn/{gsub(/ /,"",$2); print $2}')
-    CURR_RATE=$(echo "$HAINFO" | awk -F: '/^ConnRate:/{gsub(/ /,"",$2); print $2}')
-    IDLE_PCT=$(echo "$HAINFO" | awk -F: '/^Idle_pct/{gsub(/ /,"",$2); print $2}')
-    NBTHREAD=$(echo "$HAINFO" | awk -F: '/^Nbthread/{gsub(/ /,"",$2); print $2}')
-    UPTIME=$(echo "$HAINFO" | awk -F: '/^Uptime:/{print $2}')
+    CURR_CONN=$(echo "$HAINFO" | awk -F: '$1 == "CurrConns" {gsub(/ /,"",$2); print $2}')
+    MAX_CONN=$(echo "$HAINFO" | awk -F: '$1 == "Maxconn" {gsub(/ /,"",$2); print $2}')
+    CURR_RATE=$(echo "$HAINFO" | awk -F: '$1 == "ConnRate" {gsub(/ /,"",$2); print $2}')
+    IDLE_PCT=$(echo "$HAINFO" | awk -F: '$1 == "Idle_pct" {gsub(/ /,"",$2); print $2}')
+    NBTHREAD=$(echo "$HAINFO" | awk -F: '$1 == "Nbthread" {gsub(/ /,"",$2); print $2}')
+    UPTIME=$(echo "$HAINFO" | awk -F: '$1 == "Uptime" {print $2}')
 
     echo "  Current connections:  ${CURR_CONN:-?}"
     echo "  Max connections:      ${MAX_CONN:-?}"
