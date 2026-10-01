@@ -310,8 +310,47 @@ if [[ -n "$router_node_list" ]]; then
 
       # List top pods on nodes with high utilization
       if (( cpu_hot == 1 || mem_hot == 1 )); then
-        typeset top_pods
-        top_pods=$(oc adm top pods -A --no-headers --field-selector="spec.nodeName=${rnode}" 2>/dev/null || true)
+        # oc adm top pods does not support --field-selector for nodeName.
+        # Instead, get pods on this node via the API, then query their metrics.
+        typeset node_pod_list top_pods=""
+        node_pod_list=$(oc get pods -A --no-headers --field-selector="spec.nodeName=${rnode},status.phase=Running" \
+          -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name' 2>/dev/null || true)
+
+        if [[ -n "$node_pod_list" ]]; then
+          # Query metrics per namespace to avoid per-pod API calls
+          typeset seen_ns=""
+          while IFS= read -r nspod; do
+            typeset tns tpod
+            tns=$(echo "$nspod" | awk '{print $1}')
+            tpod=$(echo "$nspod" | awk '{print $2}')
+            [[ -z "$tns" || -z "$tpod" ]] && continue
+
+            # Batch: fetch top pods per namespace only once
+            case "$seen_ns" in
+              *"|${tns}|"*) ;;
+              *)
+                seen_ns="${seen_ns}|${tns}|"
+                typeset ns_metrics
+                ns_metrics=$(oc adm top pods -n "$tns" --no-headers 2>/dev/null || true)
+                if [[ -n "$ns_metrics" ]]; then
+                  # Filter to only pods on this node
+                  echo "$ns_metrics" | while IFS= read -r mline; do
+                    typeset mpod
+                    mpod=$(echo "$mline" | awk '{print $1}')
+                    # Check if this pod is on our node
+                    if echo "$node_pod_list" | awk -v ns="$tns" -v p="$mpod" '$1==ns && $2==p {found=1} END {exit !found}' 2>/dev/null; then
+                      echo "${tns} ${mline}"
+                    fi
+                  done
+                fi
+                ;;
+            esac
+          done <<< "$node_pod_list" > /tmp/.haproxy_diag_toppods_$$ 2>/dev/null
+
+          top_pods=$(cat /tmp/.haproxy_diag_toppods_$$ 2>/dev/null || true)
+          rm -f /tmp/.haproxy_diag_toppods_$$ 2>/dev/null
+        fi
+
         if [[ -n "$top_pods" ]]; then
           if (( cpu_hot == 1 )); then
             echo "  │  Top pods by CPU on this node:"
@@ -335,6 +374,8 @@ if [[ -n "$router_node_list" ]]; then
               printf "  │    %-45s CPU: %-10s Mem: %s\n" "${p_ns}/${p_name}" "$p_cpu" "$p_mem"
             done
           fi
+        else
+          echo "  │  (no pod metrics available for this node)"
         fi
       fi
     fi
