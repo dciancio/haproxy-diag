@@ -29,15 +29,16 @@ HAProxy router performance diagnostics for OpenShift / Azure Red Hat OpenShift (
 | # | Check | What It Does |
 |---|-------|-------------|
 | 0 | Cluster Context | API server, OCP version, timestamp |
-| 1 | IC Config | Replicas, thread count, maxconn from IngressController spec |
-| 2 | Pod Status | Router pods, node placement, restart counts |
-| 3 | Resource Usage | Live CPU/memory per router container via `oc adm top pods` |
-| 4 | HAProxy Stats Socket | `show info` — CurrConns, Maxconn, ConnRate, Idle_pct with threshold alerts |
-| 5 | Backend Queues | `show stat` — queued requests + top-5 busiest backends |
-| 6 | Error Rates | 502/503/504 counts and reload frequency from router logs |
-| 7 | Route Density | Total routes ÷ router pods — alerts if >2000 routes/pod |
-| 8 | Prometheus Metrics | Connection rate, p99/p50 latency, 5xx rate, queue depth via Thanos Querier |
-| 9 | Verdict | Scale trigger summary + remediation commands |
+| 1 | Infra Node Sizing | Node count, CPU/memory capacity, AZ placement, instance type, resource utilization; infra MachineSet replicas, VM size, and zone |
+| 2 | IC Config | Replicas, thread count, maxconn, node placement selectors/tolerations, CPU/memory requests and limits from the IngressController spec |
+| 3 | Pod Status | Router pods, node placement, restart counts |
+| 4 | Resource Usage | Live CPU/memory per router container, requests vs limits, QoS class (Guaranteed/Burstable/BestEffort), which node roles each pod is scheduled on |
+| 5 | HAProxy Stats Socket | `show info` — CurrConns, Maxconn, ConnRate, Idle_pct with threshold alerts |
+| 6 | Backend Queues | `show stat` — queued requests + top-5 busiest backends |
+| 7 | Error Rates | 502/503/504 counts and reload frequency from router logs |
+| 8 | Route Density | Total routes ÷ router pods — alerts if >2000 routes/pod |
+| 9 | Prometheus Metrics | Connection rate, p99/p50 latency, 5xx rate, queue depth, CPU CFS throttling via Thanos Querier |
+| 10 | Verdict | Scale trigger summary + remediation commands |
 
 ## Scale Trigger Thresholds
 
@@ -50,6 +51,7 @@ HAProxy router performance diagnostics for OpenShift / Azure Red Hat OpenShift (
 | Router pod CPU | > 80% of limit for 10+ min | Add replicas |
 | Routes per replica | > 2000 | Shard by route labels |
 | p99 latency | > 5× p50 | Contention under load |
+| CPU CFS throttled periods | > 0 sustained | Kernel capping CPU — raise limits or add replicas |
 
 ## Prometheus Connectivity
 

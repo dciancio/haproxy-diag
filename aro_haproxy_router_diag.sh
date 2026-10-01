@@ -53,7 +53,77 @@ oc version 2>/dev/null | head -3 || true
 echo "IngressController: ${IC_NAME}"
 echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
-# ── 1. IngressController spec ───────────────────────────────────────
+# ── 1. Infra node sizing & MachineSets ─────────────────────────────
+header "Infrastructure Node Sizing"
+INFRA_NODES=$(oc get nodes -l node-role.kubernetes.io/infra="" -o json 2>/dev/null) || INFRA_NODES='{"items":[]}'
+INFRA_COUNT=$(echo "$INFRA_NODES" | jq '.items | length')
+
+if (( INFRA_COUNT > 0 )); then
+  echo "  Infra nodes: ${INFRA_COUNT}"
+  echo ""
+  echo "$INFRA_NODES" | jq -r '
+    .items[] |
+    "  \(.metadata.name)
+     CPU:    \(.status.allocatable.cpu // "?") allocatable  /  \(.status.capacity.cpu // "?") capacity
+     Memory: \(.status.allocatable.memory // "?") allocatable  /  \(.status.capacity.memory // "?") capacity
+     Zone:   \(.metadata.labels["topology.kubernetes.io/zone"] // "n/a")
+     Type:   \(.metadata.labels["node.kubernetes.io/instance-type"] // .metadata.labels["beta.kubernetes.io/instance-type"] // "n/a")"
+  '
+
+  # Show node resource utilization
+  echo ""
+  echo "  Infra node resource usage (oc adm top node):"
+  for NODE in $(echo "$INFRA_NODES" | jq -r '.items[].metadata.name'); do
+    oc adm top node "$NODE" 2>/dev/null || true
+  done
+else
+  warn "No nodes with label node-role.kubernetes.io/infra found"
+  echo "  Router pods may be running on worker nodes"
+
+  # Show where router pods are actually scheduled
+  if (( POD_COUNT > 0 )) 2>/dev/null; then
+    true
+  else
+    typeset router_nodes
+    router_nodes=$(oc get pods -n "$NS_INGRESS" \
+      -l "ingresscontroller.operator.openshift.io/deployment-ingresscontroller=${IC_NAME}" \
+      -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>/dev/null | sort -u || true)
+    if [[ -n "$router_nodes" ]]; then
+      echo "  Router pods are on:"
+      echo "$router_nodes" | while IFS= read -r n; do
+        typeset ntype
+        ntype=$(oc get node "$n" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}' 2>/dev/null || echo "?")
+        echo "    ${n}  (${ntype})"
+      done
+    fi
+  fi
+fi
+
+# Infra MachineSets
+echo ""
+echo "  Infrastructure MachineSets:"
+typeset ms_json
+ms_json=$(oc get machinesets -n openshift-machine-api -o json 2>/dev/null) || ms_json='{"items":[]}'
+typeset infra_ms
+infra_ms=$(echo "$ms_json" | jq '[.items[] | select(
+  .spec.template.spec.metadata.labels["node-role.kubernetes.io/infra"] != null or
+  (.spec.template.spec.taints // [] | any(.key == "node-role.kubernetes.io/infra"))
+)]')
+typeset infra_ms_count
+infra_ms_count=$(echo "$infra_ms" | jq 'length')
+
+if (( infra_ms_count > 0 )); then
+  echo "$infra_ms" | jq -r '.[] |
+    "  \(.metadata.name)
+     Replicas:  \(.spec.replicas // "?") desired  /  \(.status.readyReplicas // 0) ready
+     VM Type:   \(.spec.template.spec.providerSpec.value.vmSize // .spec.template.spec.providerSpec.value.instanceType // "n/a")
+     Zone:      \(.spec.template.spec.providerSpec.value.zone // .spec.template.spec.providerSpec.value.placement.availabilityZone // "n/a")"
+  '
+else
+  warn "No infra-labeled MachineSets found"
+fi
+
+# ── 2. IngressController spec ───────────────────────────────────────
 header "IngressController Configuration"
 IC_JSON=$(oc get ingresscontroller "$IC_NAME" -n "$NS_OPERATOR" -o json 2>/dev/null) || {
     crit "Failed to get IngressController '${IC_NAME}' — check name and permissions"
@@ -68,13 +138,38 @@ if [[ -n "$IC_JSON" ]]; then
     echo "  Threads:     ${THREADS}"
     echo "  MaxConn:     ${MAXCONN}"
 
+    # Node placement
+    typeset np_selector np_tolerations
+    np_selector=$(echo "$IC_JSON" | jq -r '.spec.nodePlacement.nodeSelector.matchLabels // empty | to_entries[] | "      \(.key)=\(.value)"' 2>/dev/null || true)
+    np_tolerations=$(echo "$IC_JSON" | jq -r '.spec.nodePlacement.tolerations // empty | .[] | "      \(.key)=\(.value // "*"):\(.effect)"' 2>/dev/null || true)
+    if [[ -n "$np_selector" ]]; then
+      echo "  Node selector:"
+      echo "$np_selector"
+    else
+      echo "  Node selector: none (default worker placement)"
+    fi
+    if [[ -n "$np_tolerations" ]]; then
+      echo "  Tolerations:"
+      echo "$np_tolerations"
+    fi
+
+    # Resource requests and limits from the IC spec
+    typeset ic_cpu_req ic_cpu_lim ic_mem_req ic_mem_lim
+    ic_cpu_req=$(echo "$IC_JSON" | jq -r '.spec.resources.requests.cpu // "unset"' 2>/dev/null)
+    ic_cpu_lim=$(echo "$IC_JSON" | jq -r '.spec.resources.limits.cpu // "unset"' 2>/dev/null)
+    ic_mem_req=$(echo "$IC_JSON" | jq -r '.spec.resources.requests.memory // "unset"' 2>/dev/null)
+    ic_mem_lim=$(echo "$IC_JSON" | jq -r '.spec.resources.limits.memory // "unset"' 2>/dev/null)
+    echo "  IC spec resources:"
+    echo "    CPU:    request=${ic_cpu_req}  limit=${ic_cpu_lim}"
+    echo "    Memory: request=${ic_mem_req}  limit=${ic_mem_lim}"
+
     AVAIL=$(echo "$IC_JSON" | jq -r '.status.conditions[]? | select(.type=="Available") | .status')
     DEGRADED=$(echo "$IC_JSON" | jq -r '.status.conditions[]? | select(.type=="Degraded") | .status')
     [[ "$AVAIL" == "True" ]] && ok "IngressController Available" || crit "IngressController NOT Available"
     [[ "$DEGRADED" == "False" ]] && ok "IngressController not degraded" || warn "IngressController is DEGRADED"
 fi
 
-# ── 2. Router pod status ────────────────────────────────────────────
+# ── 3. Router pod status ────────────────────────────────────────────
 header "Router Pod Status"
 PODS_JSON=$(oc get pods -n "$NS_INGRESS" -l "ingresscontroller.operator.openshift.io/deployment-ingresscontroller=${IC_NAME}" -o json 2>/dev/null) || {
     crit "Failed to list router pods — check permissions on namespace ${NS_INGRESS}"
@@ -99,19 +194,48 @@ else
     warn "No router pods found for IngressController '${IC_NAME}'"
 fi
 
-# ── 3. Resource usage ───────────────────────────────────────────────
-header "Resource Usage (oc adm top pods)"
+# ── 4. Resource usage ───────────────────────────────────────────────
+header "Router Pod Resource Usage"
+
+# Live usage from metrics server
+echo "  Current usage (oc adm top pods):"
 oc adm top pods -n "$NS_INGRESS" --containers 2>/dev/null | grep router || warn "Metrics server unavailable"
 
-# Get resource limits for threshold comparison
+# Detailed requests/limits per pod
 echo ""
-echo "  Resource limits per pod:"
+echo "  Resource requests & limits per router pod:"
 echo "$PODS_JSON" | jq -r '
   .items[] |
-  "  \(.metadata.name)  cpu-limit=\(.spec.containers[0].resources.limits.cpu // "none")  mem-limit=\(.spec.containers[0].resources.limits.memory // "none")"
-'
+  .metadata.name as $name |
+  .spec.containers[] | select(.name == "router") |
+  "  \($name)
+     CPU:    request=\(.resources.requests.cpu // "none")  limit=\(.resources.limits.cpu // "none")
+     Memory: request=\(.resources.requests.memory // "none")  limit=\(.resources.limits.memory // "none")
+     QoS:    \(
+       if (.resources.limits.cpu // null) != null and (.resources.limits.memory // null) != null
+          and (.resources.requests.cpu // null) == (.resources.limits.cpu // null)
+          and (.resources.requests.memory // null) == (.resources.limits.memory // null)
+       then "Guaranteed"
+       elif (.resources.requests.cpu // null) != null or (.resources.requests.memory // null) != null
+       then "Burstable"
+       else "BestEffort"
+       end
+     )"
+' 2>/dev/null || echo "  (could not read pod specs)"
 
-# ── 4. HAProxy live stats (via stats socket) ────────────────────────
+# Check if router pods are running on infra vs worker nodes
+echo ""
+echo "  Router pod node placement:"
+echo "$PODS_JSON" | jq -r '.items[] | "\(.metadata.name) → \(.spec.nodeName)"' 2>/dev/null | while IFS= read -r line; do
+  typeset pod_name node_name node_role
+  pod_name="${line%% →*}"
+  node_name="${line#*→ }"
+  node_role=$(oc get node "$node_name" -o jsonpath='{range .metadata.labels}{@}{"\n"}{end}' 2>/dev/null \
+    | grep 'node-role.kubernetes.io' | sed 's|node-role.kubernetes.io/||' | tr '\n' ',' | sed 's/,$//' || echo "?")
+  echo "  ${pod_name}  →  ${node_name}  (roles: ${node_role:-?})"
+done
+
+# ── 5. HAProxy live stats (via stats socket) ────────────────────────
 header "HAProxy Process Info (first pod)"
 FIRST_POD=$(echo "$PODS_JSON" | jq -r '.items[0].metadata.name')
 if [[ -n "$FIRST_POD" && "$FIRST_POD" != "null" ]]; then
@@ -163,7 +287,7 @@ else
   warn "No router pods found"
 fi
 
-# ── 5. Backend queue check ──────────────────────────────────────────
+# ── 6. Backend queue check ──────────────────────────────────────────
 header "Backend Queue Depth"
 if [[ -n "$FIRST_POD" && "$FIRST_POD" != "null" ]]; then
   STATS_CSV=$(oc exec -n "$NS_INGRESS" "$FIRST_POD" -- \
@@ -187,7 +311,7 @@ if [[ -n "$FIRST_POD" && "$FIRST_POD" != "null" ]]; then
   fi
 fi
 
-# ── 6. Recent 503s and connection errors ────────────────────────────
+# ── 7. Recent 503s and connection errors ────────────────────────────
 header "Error Indicators (from router logs, last 500 lines)"
 for POD in $(echo "$PODS_JSON" | jq -r '.items[].metadata.name'); do
   echo "  --- ${POD} ---"
@@ -204,7 +328,7 @@ for POD in $(echo "$PODS_JSON" | jq -r '.items[].metadata.name'); do
   fi
 done
 
-# ── 7. Route count ──────────────────────────────────────────────────
+# ── 8. Route count ──────────────────────────────────────────────────
 header "Route Load"
 ROUTE_COUNT=$(oc get routes -A --no-headers 2>/dev/null | wc -l | tr -d ' ')
 echo "  Total routes in cluster: ${ROUTE_COUNT}"
@@ -221,7 +345,7 @@ if (( POD_COUNT > 0 )); then
   fi
 fi
 
-# ── 8. Prometheus query (if token available) ────────────────────────
+# ── 9. Prometheus query (if token available) ────────────────────────
 header "Prometheus Metrics Snapshot"
 TOKEN=""
 PROM_URL=""
@@ -352,7 +476,7 @@ else
   echo "  Prometheus queries skipped"
 fi
 
-# ── 9. Verdict ──────────────────────────────────────────────────────
+# ── 10. Verdict ─────────────────────────────────────────────────────
 header "Summary & Recommendations"
 echo ""
 echo "  Scale triggers (if ANY are true → add replicas or shard):"
