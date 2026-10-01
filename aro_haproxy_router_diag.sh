@@ -299,11 +299,11 @@ if [[ -n "$router_node_list" ]]; then
       typeset pct_num
       pct_num=$(echo "$cpu_pct" | tr -d '%')
       if [[ "$pct_num" =~ ^[0-9]+$ ]] && (( pct_num > 80 )); then
-        echo "  │  $(printf "${RED}✖  Node CPU at ${cpu_pct} — consider larger instance type${RST}")"
+        printf "  │  ${RED}✖  Node CPU at %s — consider larger instance type${RST}\n" "$cpu_pct"
       fi
       pct_num=$(echo "$mem_pct" | tr -d '%')
       if [[ "$pct_num" =~ ^[0-9]+$ ]] && (( pct_num > 85 )); then
-        echo "  │  $(printf "${RED}✖  Node memory at ${mem_pct} — consider larger instance type${RST}")"
+        printf "  │  ${RED}✖  Node memory at %s — consider larger instance type${RST}\n" "$mem_pct"
       fi
     fi
 
