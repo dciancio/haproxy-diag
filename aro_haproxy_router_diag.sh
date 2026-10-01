@@ -53,74 +53,88 @@ oc version 2>/dev/null | head -3 || true
 echo "IngressController: ${IC_NAME}"
 echo "Timestamp: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
-# ── 1. Infra node sizing & MachineSets ─────────────────────────────
-header "Infrastructure Node Sizing"
-INFRA_NODES=$(oc get nodes -l node-role.kubernetes.io/infra="" -o json 2>/dev/null) || INFRA_NODES='{"items":[]}'
-INFRA_COUNT=$(echo "$INFRA_NODES" | jq '.items | length')
+# ── 1. Ingress node sizing & MachineSets ───────────────────────────
+header "Ingress Node Sizing"
 
-if (( INFRA_COUNT > 0 )); then
-  echo "  Infra nodes: ${INFRA_COUNT}"
-  echo ""
-  echo "$INFRA_NODES" | jq -r '
-    .items[] |
-    "  \(.metadata.name)
-     CPU:    \(.status.allocatable.cpu // "?") allocatable  /  \(.status.capacity.cpu // "?") capacity
-     Memory: \(.status.allocatable.memory // "?") allocatable  /  \(.status.capacity.memory // "?") capacity
-     Zone:   \(.metadata.labels["topology.kubernetes.io/zone"] // "n/a")
-     Type:   \(.metadata.labels["node.kubernetes.io/instance-type"] // .metadata.labels["beta.kubernetes.io/instance-type"] // "n/a")"
-  '
+# List infra and worker nodes
+typeset ALL_NODES
+ALL_NODES=$(oc get nodes -o json 2>/dev/null) || ALL_NODES='{"items":[]}'
 
-  # Show node resource utilization
-  echo ""
-  echo "  Infra node resource usage (oc adm top node):"
-  for NODE in $(echo "$INFRA_NODES" | jq -r '.items[].metadata.name'); do
-    oc adm top node "$NODE" 2>/dev/null || true
-  done
-else
-  warn "No nodes with label node-role.kubernetes.io/infra found"
-  echo "  Router pods may be running on worker nodes"
+typeset infra_nodes_json worker_nodes_json
+infra_nodes_json=$(echo "$ALL_NODES" | jq '[.items[] | select(.metadata.labels["node-role.kubernetes.io/infra"] != null)]')
+worker_nodes_json=$(echo "$ALL_NODES" | jq '[.items[] | select(.metadata.labels["node-role.kubernetes.io/worker"] != null)]')
 
-  # Show where router pods are actually scheduled
-  if (( POD_COUNT > 0 )) 2>/dev/null; then
-    true
-  else
-    typeset router_nodes
-    router_nodes=$(oc get pods -n "$NS_INGRESS" \
-      -l "ingresscontroller.operator.openshift.io/deployment-ingresscontroller=${IC_NAME}" \
-      -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>/dev/null | sort -u || true)
-    if [[ -n "$router_nodes" ]]; then
-      echo "  Router pods are on:"
-      echo "$router_nodes" | while IFS= read -r n; do
-        typeset ntype
-        ntype=$(oc get node "$n" -o jsonpath='{.metadata.labels.node\.kubernetes\.io/instance-type}' 2>/dev/null || echo "?")
-        echo "    ${n}  (${ntype})"
-      done
-    fi
+typeset infra_count worker_count
+infra_count=$(echo "$infra_nodes_json" | jq 'length')
+worker_count=$(echo "$worker_nodes_json" | jq 'length')
+
+echo "  Infra nodes:  ${infra_count}"
+echo "  Worker nodes: ${worker_count}"
+
+print_node_details() {
+  typeset nodes_json="$1"
+  typeset label="$2"
+  typeset count
+  count=$(echo "$nodes_json" | jq 'length')
+  if (( count == 0 )); then
+    warn "No ${label} nodes found"
+    return
   fi
-fi
+  echo ""
+  echo "  ${label} nodes:"
+  echo "$nodes_json" | jq -r '.[] |
+    "  ┌─ \(.metadata.name)
+  │  Roles:    \([.metadata.labels | to_entries[] | select(.key | startswith("node-role.kubernetes.io/")) | .key | ltrimstr("node-role.kubernetes.io/")] | join(", "))
+  │  Instance: \(.metadata.labels["node.kubernetes.io/instance-type"] // .metadata.labels["beta.kubernetes.io/instance-type"] // "n/a")
+  │  Zone:     \(.metadata.labels["topology.kubernetes.io/zone"] // .metadata.labels["failure-domain.beta.kubernetes.io/zone"] // "n/a")
+  │  CPU:      \(.status.allocatable.cpu // "?") allocatable / \(.status.capacity.cpu // "?") capacity
+  │  Memory:   \(.status.allocatable.memory // "?") allocatable / \(.status.capacity.memory // "?") capacity
+  └──"
+  '
+}
 
-# Infra MachineSets
+print_node_details "$infra_nodes_json" "Infra"
+print_node_details "$worker_nodes_json" "Worker"
+
+# Node resource utilization for infra + worker
 echo ""
-echo "  Infrastructure MachineSets:"
+echo "  Node resource utilization:"
+oc adm top nodes --no-headers 2>/dev/null | while IFS= read -r topline; do
+  typeset tnode
+  tnode=$(echo "$topline" | awk '{print $1}')
+  # Only show infra and worker nodes (skip master/control-plane)
+  typeset troles
+  troles=$(echo "$ALL_NODES" | jq -r --arg n "$tnode" '
+    .items[] | select(.metadata.name == $n) |
+    [.metadata.labels | to_entries[] | select(.key | startswith("node-role.kubernetes.io/")) | .key | ltrimstr("node-role.kubernetes.io/")] | join(",")
+  ')
+  case "$troles" in
+    *infra*|*worker*) printf "    %-50s %s\n" "$tnode" "$(echo "$topline" | awk '{printf "CPU: %s (%s)  Mem: %s (%s)", $2, $3, $4, $5}')" ;;
+  esac
+done
+
+# MachineSets (infra + worker)
+echo ""
+echo "  MachineSets:"
 typeset ms_json
 ms_json=$(oc get machinesets -n openshift-machine-api -o json 2>/dev/null) || ms_json='{"items":[]}'
-typeset infra_ms
-infra_ms=$(echo "$ms_json" | jq '[.items[] | select(
-  .spec.template.spec.metadata.labels["node-role.kubernetes.io/infra"] != null or
-  (.spec.template.spec.taints // [] | any(.key == "node-role.kubernetes.io/infra"))
-)]')
-typeset infra_ms_count
-infra_ms_count=$(echo "$infra_ms" | jq 'length')
+typeset ms_count
+ms_count=$(echo "$ms_json" | jq '.items | length')
 
-if (( infra_ms_count > 0 )); then
-  echo "$infra_ms" | jq -r '.[] |
-    "  \(.metadata.name)
-     Replicas:  \(.spec.replicas // "?") desired  /  \(.status.readyReplicas // 0) ready
-     VM Type:   \(.spec.template.spec.providerSpec.value.vmSize // .spec.template.spec.providerSpec.value.instanceType // "n/a")
-     Zone:      \(.spec.template.spec.providerSpec.value.zone // .spec.template.spec.providerSpec.value.placement.availabilityZone // "n/a")"
+if (( ms_count > 0 )); then
+  echo "$ms_json" | jq -r '.items[] |
+    .metadata.name as $name |
+    (
+      [.spec.template.spec.metadata.labels // {} | to_entries[] | select(.key | startswith("node-role.kubernetes.io/")) | .key | ltrimstr("node-role.kubernetes.io/")] | join(",")
+    ) as $role |
+    "  ┌─ \($name)  [\(if $role == "" then "worker" else $role end)]
+  │  Replicas:  \(.spec.replicas // "?") desired / \(.status.readyReplicas // 0) ready
+  │  VM Type:   \(.spec.template.spec.providerSpec.value.vmSize // .spec.template.spec.providerSpec.value.instanceType // "n/a")
+  │  Zone:      \(.spec.template.spec.providerSpec.value.zone // .spec.template.spec.providerSpec.value.placement.availabilityZone // "n/a")
+  └──"
   '
 else
-  warn "No infra-labeled MachineSets found"
+  warn "No MachineSets found (may be using standalone machines or ROSA/ARO HCP)"
 fi
 
 # ── 2. IngressController spec ───────────────────────────────────────

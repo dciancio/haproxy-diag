@@ -29,7 +29,7 @@ HAProxy router performance diagnostics for OpenShift / Azure Red Hat OpenShift (
 | # | Check | What It Does |
 |---|-------|-------------|
 | 0 | Cluster Context | API server, OCP version, timestamp |
-| 1 | Infra Node Sizing | Node count, CPU/memory capacity, AZ placement, instance type, resource utilization; infra MachineSet replicas, VM size, and zone |
+| 1 | Ingress Node Sizing | Lists both infra and worker nodes with CPU/memory capacity, AZ, instance type; live utilization for all infra/worker nodes; all MachineSets with role, replicas, VM size, and zone |
 | 2 | IC Config | Replicas, thread count, maxconn, node placement selectors/tolerations, CPU/memory requests and limits from the IngressController spec |
 | 3 | Pod Status | Router pods, node placement, restart counts |
 | 4 | Resource Usage | Live CPU/memory per router container, requests vs limits, QoS class (Guaranteed/Burstable/BestEffort), which node roles each pod is scheduled on |
