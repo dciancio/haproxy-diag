@@ -295,15 +295,47 @@ if [[ -n "$router_node_list" ]]; then
       echo "  │  CPU used:    ${cpu_used} (${cpu_pct})"
       echo "  │  Memory used: ${mem_used} (${mem_pct})"
 
-      # Check for high utilization
-      typeset pct_num
+      # Check for high utilization and show top pods on offending nodes
+      typeset pct_num cpu_hot=0 mem_hot=0
       pct_num=$(echo "$cpu_pct" | tr -d '%')
       if [[ "$pct_num" =~ ^[0-9]+$ ]] && (( pct_num > 80 )); then
         printf "  │  ${RED}✖  Node CPU at %s — consider larger instance type${RST}\n" "$cpu_pct"
+        cpu_hot=1
       fi
       pct_num=$(echo "$mem_pct" | tr -d '%')
       if [[ "$pct_num" =~ ^[0-9]+$ ]] && (( pct_num > 85 )); then
         printf "  │  ${RED}✖  Node memory at %s — consider larger instance type${RST}\n" "$mem_pct"
+        mem_hot=1
+      fi
+
+      # List top pods on nodes with high utilization
+      if (( cpu_hot == 1 || mem_hot == 1 )); then
+        typeset top_pods
+        top_pods=$(oc adm top pods -A --no-headers --field-selector="spec.nodeName=${rnode}" 2>/dev/null || true)
+        if [[ -n "$top_pods" ]]; then
+          if (( cpu_hot == 1 )); then
+            echo "  │  Top pods by CPU on this node:"
+            echo "$top_pods" | sort -k3 -hr | head -10 | while IFS= read -r podline; do
+              typeset p_ns p_name p_cpu p_mem
+              p_ns=$(echo "$podline" | awk '{print $1}')
+              p_name=$(echo "$podline" | awk '{print $2}')
+              p_cpu=$(echo "$podline" | awk '{print $3}')
+              p_mem=$(echo "$podline" | awk '{print $4}')
+              printf "  │    %-45s CPU: %-10s Mem: %s\n" "${p_ns}/${p_name}" "$p_cpu" "$p_mem"
+            done
+          fi
+          if (( mem_hot == 1 )); then
+            echo "  │  Top pods by Memory on this node:"
+            echo "$top_pods" | sort -k4 -hr | head -10 | while IFS= read -r podline; do
+              typeset p_ns p_name p_cpu p_mem
+              p_ns=$(echo "$podline" | awk '{print $1}')
+              p_name=$(echo "$podline" | awk '{print $2}')
+              p_cpu=$(echo "$podline" | awk '{print $3}')
+              p_mem=$(echo "$podline" | awk '{print $4}')
+              printf "  │    %-45s CPU: %-10s Mem: %s\n" "${p_ns}/${p_name}" "$p_cpu" "$p_mem"
+            done
+          fi
+        fi
       fi
     fi
 
