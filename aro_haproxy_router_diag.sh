@@ -223,17 +223,80 @@ echo "$PODS_JSON" | jq -r '
      )"
 ' 2>/dev/null || echo "  (could not read pod specs)"
 
-# Check if router pods are running on infra vs worker nodes
+# Detect where router pods are running and show node sizing
 echo ""
-echo "  Router pod node placement:"
-echo "$PODS_JSON" | jq -r '.items[] | "\(.metadata.name) → \(.spec.nodeName)"' 2>/dev/null | while IFS= read -r line; do
-  typeset pod_name node_name node_role
-  pod_name="${line%% →*}"
-  node_name="${line#*→ }"
-  node_role=$(oc get node "$node_name" -o jsonpath='{range .metadata.labels}{@}{"\n"}{end}' 2>/dev/null \
-    | grep 'node-role.kubernetes.io' | sed 's|node-role.kubernetes.io/||' | tr '\n' ',' | sed 's/,$//' || echo "?")
-  echo "  ${pod_name}  →  ${node_name}  (roles: ${node_role:-?})"
-done
+echo "  Router pod node sizing:"
+typeset router_node_list
+router_node_list=$(echo "$PODS_JSON" | jq -r '[.items[].spec.nodeName] | unique | .[]' 2>/dev/null || true)
+
+if [[ -n "$router_node_list" ]]; then
+  typeset on_infra=0 on_worker=0
+  echo "$router_node_list" | while IFS= read -r rnode; do
+    [[ -z "$rnode" ]] && continue
+    typeset rnode_json
+    rnode_json=$(oc get node "$rnode" -o json 2>/dev/null || true)
+    [[ -z "$rnode_json" ]] && continue
+
+    typeset rnode_roles rnode_type rnode_zone
+    typeset rnode_cpu_cap rnode_cpu_alloc rnode_mem_cap rnode_mem_alloc
+    typeset rnode_pods_on
+
+    rnode_roles=$(echo "$rnode_json" | jq -r '
+      [.metadata.labels | to_entries[] | select(.key | startswith("node-role.kubernetes.io/")) | .key | ltrimstr("node-role.kubernetes.io/")] | join(",")
+    ')
+    rnode_type=$(echo "$rnode_json" | jq -r '
+      .metadata.labels["node.kubernetes.io/instance-type"] //
+      .metadata.labels["beta.kubernetes.io/instance-type"] // "n/a"
+    ')
+    rnode_zone=$(echo "$rnode_json" | jq -r '
+      .metadata.labels["topology.kubernetes.io/zone"] //
+      .metadata.labels["failure-domain.beta.kubernetes.io/zone"] // "n/a"
+    ')
+    rnode_cpu_cap=$(echo "$rnode_json" | jq -r '.status.capacity.cpu // "?"')
+    rnode_cpu_alloc=$(echo "$rnode_json" | jq -r '.status.allocatable.cpu // "?"')
+    rnode_mem_cap=$(echo "$rnode_json" | jq -r '.status.capacity.memory // "?"')
+    rnode_mem_alloc=$(echo "$rnode_json" | jq -r '.status.allocatable.memory // "?"')
+
+    # Which router pods are on this node
+    rnode_pods_on=$(echo "$PODS_JSON" | jq -r --arg n "$rnode" '
+      [.items[] | select(.spec.nodeName == $n) | .metadata.name] | join(", ")
+    ')
+
+    echo "  ┌─ ${rnode}"
+    echo "  │  Roles:       ${rnode_roles:-?}"
+    echo "  │  Instance:    ${rnode_type}"
+    echo "  │  Zone:        ${rnode_zone}"
+    echo "  │  CPU:         ${rnode_cpu_alloc} allocatable / ${rnode_cpu_cap} capacity"
+    echo "  │  Memory:      ${rnode_mem_alloc} allocatable / ${rnode_mem_cap} capacity"
+
+    # Live node utilization
+    typeset rnode_top
+    rnode_top=$(oc adm top node "$rnode" --no-headers 2>/dev/null || true)
+    if [[ -n "$rnode_top" ]]; then
+      typeset cpu_used cpu_pct mem_used mem_pct
+      cpu_used=$(echo "$rnode_top" | awk '{print $2}')
+      cpu_pct=$(echo "$rnode_top" | awk '{print $3}')
+      mem_used=$(echo "$rnode_top" | awk '{print $4}')
+      mem_pct=$(echo "$rnode_top" | awk '{print $5}')
+      echo "  │  CPU used:    ${cpu_used} (${cpu_pct})"
+      echo "  │  Memory used: ${mem_used} (${mem_pct})"
+
+      # Check for high utilization
+      typeset pct_num
+      pct_num=$(echo "$cpu_pct" | tr -d '%')
+      if [[ "$pct_num" =~ ^[0-9]+$ ]] && (( pct_num > 80 )); then
+        echo "  │  $(printf "${RED}✖  Node CPU at ${cpu_pct} — consider larger instance type${RST}")"
+      fi
+      pct_num=$(echo "$mem_pct" | tr -d '%')
+      if [[ "$pct_num" =~ ^[0-9]+$ ]] && (( pct_num > 85 )); then
+        echo "  │  $(printf "${RED}✖  Node memory at ${mem_pct} — consider larger instance type${RST}")"
+      fi
+    fi
+
+    echo "  │  Router pods: ${rnode_pods_on}"
+    echo "  └──"
+  done
+fi
 
 # ── 5. HAProxy live stats (via stats socket) ────────────────────────
 header "HAProxy Process Info (first pod)"
